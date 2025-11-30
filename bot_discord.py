@@ -1,6 +1,5 @@
 import dotenv
 
-
 dotenv.load_dotenv()
 
 class BotDiscord:
