@@ -1,5 +1,6 @@
 import yt_dlp
 import discord
+from control_comandos import MusicControls
 import re
 import asyncio
 from collections import deque
@@ -24,8 +25,10 @@ class Comandos:
         }
         self.queue = deque()  # Cola de canciones
         self.current_song = None  # Canción actual
-        self.rept_url = None  # URL de la canción actual para repetir
-        
+        self.last_url = None  # URL original de la última canción
+        self.last_title = None  # Título de la última canción
+        self.replay = 0  # Variable para controlar el replay
+        self.music_control = None
 
 
     async def check_channel(self, ctx):
@@ -45,15 +48,28 @@ class Comandos:
         return True
     
     
-    async def play_song(self, ctx, url):
+    async def skip_song(self, ctx):
+        if ctx.voice_client and ctx.voice_client.is_playing():
+            ctx.voice_client.stop()
+            return True
+        else:
+            ctx.send('No hay música reproduciéndose para saltar')
+            
+    async def play_song(self, ctx, name):
         await self.check_channel(ctx)
+        view = MusicControls(self, ctx)
         try:
             # Extraer información del video con yt-dlp
             with yt_dlp.YoutubeDL(self.YDL_OPTS) as ydl:
-                info = ydl.extract_info(url, download=False)
+                info = ydl.extract_info(f"ytsearch1:{name}", download=False)
+                if 'entries' in info:
+                    info = info['entries'][0]
                 url2 = info['url']
-                self.rept_url = info['url']
                 title = info.get('title', 'Desconocido')
+                
+                # Guardar URL original y título para replay
+                self.last_url = name
+                self.last_title = title
             
             # Crear el audio source
             source = discord.FFmpegPCMAudio(url2, **self.FFMEG_OPTIONS)
@@ -62,24 +78,52 @@ class Comandos:
             if ctx.voice_client.is_playing():
                 ctx.voice_client.stop()
             
+            # Función que se ejecuta cuando termina la canción
+            def after_playing(error):
+                if error:
+                    print(f'Error en reproducción: {error}')
+                if len(self.queue) > 0:
+                    asyncio.run_coroutine_threadsafe(self.play_next(ctx), self.bot.loop)
+            
             # Reproducir la música
-            ctx.voice_client.play(source)
-            await ctx.send(f'🎵 Reproduciendo: **{title}**')
+            if self.replay == 1:
+                pass
+            else:
+                await ctx.send(f'🎵 Reproduciendo: **{title}**', view=view)
+            ctx.voice_client.play(source, after=after_playing)
+               
             
         except Exception as e:
             await ctx.send(f'❌ Error al reproducir: {str(e)}')
 
-
+    async def play_next(self, ctx):
+        """Reproduce la siguiente canción de la cola"""
+        if len(self.queue) > 0:
+            next_url = self.queue.popleft()
+            print(f'Reproduciendo siguiente de la cola: {next_url}')
+            await self.play_song(ctx, next_url)
+        else:
+            await ctx.send('✅ Cola terminada')
+    
+    async def add_to_queue(self, ctx, url):
+        # Agregar a la cola
+        self.queue.append(url)
+        
+        # Si no hay canción reproduciéndose, reproducir ahora
+        if ctx.voice_client is None or (not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused()):
+            await self.play_next(ctx)
+        
+        return len(self.queue)  # Retorna la posición en la cola
                 
     def setUp_commands(self):
         
         
-        @self.bot.command()
-        async def play(ctx, *, url):
+        @self.bot.command(aliases=['p'])
+        async def play(ctx, *, name):
             # Verificar si el usuario está en un canal de voz
             if not await self.check_channel(ctx):
                 return
-            await self.play_song(ctx, url)
+            await self.play_song(ctx, name)
            
 
         @self.bot.command()
@@ -93,30 +137,19 @@ class Comandos:
             else:
                 await ctx.send('No estoy conectado a ningún canal de voz')
         
-        
+                
+        @self.bot.command(aliases=['add'])
+        async def queue(ctx, *, url):
+            """Agrega una canción a la cola"""
+            if not ctx.voice_client or not ctx.voice_client.is_playing():
+                await ctx.send('❌ Debes reproducir una canción primero')
+                return
+            
+            # Usar la función compartida
+            position = await self.add_to_queue(ctx, url)
+            await ctx.send(f'➕ Canción agregada a la cola. Posición: **{position}**')
+                
         @self.bot.command()
-        async def pause(ctx):
-            """Pausa la reproducción"""
-            if ctx.voice_client and ctx.voice_client.is_playing():
-                ctx.voice_client.pause()
-                await ctx.send('⏸️ Música pausada')
-            else:
-                await ctx.send('No hay música reproduciéndose')
-        
-        @self.bot.command()
-        async def resume(ctx):
-            """Reanuda la reproducción"""
-            if ctx.voice_client and ctx.voice_client.is_paused():
-                ctx.voice_client.resume()
-                await ctx.send('▶️ Música reanudada')
-            else:
-                await ctx.send('La música no está pausada')
-        
-        
-        @self.bot.command()
-        async def repetir(ctx):
-            if self.rept_url:
-                await self.play_song(ctx, self.rept_url)
-                await ctx.send(f'🎵 Reproduciendo: **{self.rept_url}**')
-            else:
-                await ctx.send('No hay canción para repetir')
+        async def skip(ctx):
+            """Salta la canción actual"""
+            await self.skip_song(ctx)
